@@ -15,62 +15,77 @@
  */
 package com.google.android.exoplayer2.source.rtsp;
 
-import static com.google.android.exoplayer2.robolectric.RobolectricUtil.runMainLooperUntil;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.net.Uri;
-import androidx.annotation.Nullable;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.android.exoplayer2.C;
+import com.google.android.exoplayer2.robolectric.RobolectricUtil;
 import com.google.android.exoplayer2.source.MediaPeriod;
 import com.google.android.exoplayer2.upstream.DefaultAllocator;
+import com.google.android.exoplayer2.util.Util;
 import com.google.common.collect.ImmutableList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
-/** Unit test for {@link RtspMediaPeriod}. */
+/** Tests the {@link RtspMediaPeriod} using the {@link RtspServer}. */
 @RunWith(AndroidJUnit4.class)
-public class RtspMediaPeriodTest {
+public final class RtspMediaPeriodTest {
 
-  private static final RtspClient PLACEHOLDER_RTSP_CLIENT =
-      new RtspClient(
-          new RtspClient.SessionInfoListener() {
-            @Override
-            public void onSessionTimelineUpdated(
-                RtspSessionTiming timing, ImmutableList<RtspMediaTrack> tracks) {}
-            @Override
-            public void onSessionTimelineRequestFailed(String message, @Nullable Throwable cause) {}
-          },
-          /* userAgent= */ null,
-          Uri.EMPTY);
+  private static final long DEFAULT_TIMEOUT_MS = 8000;
+
+  private RtspMediaPeriod mediaPeriod;
+  private RtspServer rtspServer;
+
+  @After
+  public void tearDown() {
+    Util.closeQuietly(rtspServer);
+  }
 
   @Test
-  public void prepare_startsLoading() throws Exception {
-    RtspMediaPeriod rtspMediaPeriod =
+  public void prepareMediaPeriod_refreshesSourceInfoAndCallsOnPrepared() throws Exception {
+    RtpPacketStreamDump rtpPacketStreamDump =
+        RtspTestUtils.readRtpPacketStreamDump("media/rtsp/aac-dump.json");
+
+    rtspServer =
+        new RtspServer(
+            new RtspServer.ResponseProvider() {
+              @Override
+              public RtspResponse getOptionsResponse() {
+                return new RtspResponse(
+                    /* status= */ 200,
+                    new RtspHeaders.Builder().add(RtspHeaders.PUBLIC, "OPTIONS, DESCRIBE").build());
+              }
+
+              @Override
+              public RtspResponse getDescribeResponse(Uri requestedUri) {
+                return RtspTestUtils.newDescribeResponseWithSdpMessage(
+                    "v=0\r\n"
+                        + "o=- 1606776316530225 1 IN IP4 127.0.0.1\r\n"
+                        + "s=Exoplayer test\r\n"
+                        + "t=0 0\r\n"
+                        // The session is 50.46s long.
+                        + "a=range:npt=0-50.46\r\n",
+                    ImmutableList.of(rtpPacketStreamDump),
+                    requestedUri);
+              }
+            });
+
+    AtomicBoolean prepareCallbackCalled = new AtomicBoolean();
+    AtomicLong refreshedSourceDurationMs = new AtomicLong();
+
+    mediaPeriod =
         new RtspMediaPeriod(
             new DefaultAllocator(/* trimOnReset= */ true, C.DEFAULT_BUFFER_SEGMENT_SIZE),
-            ImmutableList.of(
-                new RtspMediaTrack(
-                    new MediaDescription.Builder(
-                            /* mediaType= */ MediaDescription.MEDIA_TYPE_VIDEO,
-                            /* port= */ 0,
-                            /* transportProtocol= */ MediaDescription.RTP_AVP_PROFILE,
-                            /* payloadType= */ 96)
-                        .setConnection("IN IP4 0.0.0.0")
-                        .setBitrate(500_000)
-                        .addAttribute(SessionDescription.ATTR_RTPMAP, "96 H264/90000")
-                        .addAttribute(
-                            SessionDescription.ATTR_FMTP,
-                            "96 packetization-mode=1;profile-level-id=64001F;sprop-parameter-sets=Z2QAH6zZQPARabIAAAMACAAAAwGcHjBjLA==,aOvjyyLA")
-                        .addAttribute(SessionDescription.ATTR_CONTROL, "track1")
-                        .build(),
-                    Uri.parse("rtsp://localhost/test"))),
-            PLACEHOLDER_RTSP_CLIENT,
-            new UdpDataSourceRtpDataChannelFactory());
+            new TransferRtpDataChannelFactory(DEFAULT_TIMEOUT_MS),
+            RtspTestUtils.getTestUri(rtspServer.startAndGetPortNumber()),
+            /* listener= */ timing -> refreshedSourceDurationMs.set(timing.getDurationMs()),
+            /* userAgent= */ "ExoPlayer:RtspPeriodTest");
 
-    AtomicBoolean prepareCallbackCalled = new AtomicBoolean(false);
-    rtspMediaPeriod.prepare(
+    mediaPeriod.prepare(
         new MediaPeriod.Callback() {
           @Override
           public void onPrepared(MediaPeriod mediaPeriod) {
@@ -83,20 +98,9 @@ public class RtspMediaPeriodTest {
           }
         },
         /* positionUs= */ 0);
+    RobolectricUtil.runMainLooperUntil(prepareCallbackCalled::get);
+    mediaPeriod.release();
 
-    runMainLooperUntil(prepareCallbackCalled::get);
-    rtspMediaPeriod.release();
-  }
-
-  @Test
-  public void getBufferedPositionUs_withNoRtspMediaTracks_returnsEndOfSource() {
-    RtspMediaPeriod rtspMediaPeriod =
-        new RtspMediaPeriod(
-            new DefaultAllocator(/* trimOnReset= */ true, C.DEFAULT_BUFFER_SEGMENT_SIZE),
-            ImmutableList.of(),
-            PLACEHOLDER_RTSP_CLIENT,
-            new UdpDataSourceRtpDataChannelFactory());
-
-    assertThat(rtspMediaPeriod.getBufferedPositionUs()).isEqualTo(C.TIME_END_OF_SOURCE);
+    assertThat(refreshedSourceDurationMs.get()).isEqualTo(50_460);
   }
 }

@@ -31,6 +31,7 @@ import androidx.annotation.VisibleForTesting;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.audio.AacUtil;
+import com.google.android.exoplayer2.util.CodecSpecificDataUtil;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.NalUnitUtil;
 import com.google.android.exoplayer2.util.Util;
@@ -47,6 +48,8 @@ import com.google.common.collect.ImmutableMap;
   /** Prefix for the RFC6381 codecs string for AVC formats. */
   private static final String H264_CODECS_PREFIX = "avc1.";
 
+  private static final String GENERIC_CONTROL_ATTR = "*";
+
   /** The track's associated {@link RtpPayloadFormat}. */
   public final RtpPayloadFormat payloadFormat;
   /** The track's URI. */
@@ -61,11 +64,7 @@ import com.google.common.collect.ImmutableMap;
   public RtspMediaTrack(MediaDescription mediaDescription, Uri sessionUri) {
     checkArgument(mediaDescription.attributes.containsKey(ATTR_CONTROL));
     payloadFormat = generatePayloadFormat(mediaDescription);
-    uri =
-        sessionUri
-            .buildUpon()
-            .appendEncodedPath(castNonNull(mediaDescription.attributes.get(ATTR_CONTROL)))
-            .build();
+    uri = extractTrackUri(sessionUri, castNonNull(mediaDescription.attributes.get(ATTR_CONTROL)));
   }
 
   @Override
@@ -171,10 +170,6 @@ import com.google.common.collect.ImmutableMap;
 
   private static void processH264FmtpAttribute(
       Format.Builder formatBuilder, ImmutableMap<String, String> fmtpAttributes) {
-    checkArgument(fmtpAttributes.containsKey(PARAMETER_PROFILE_LEVEL_ID));
-    String profileLevel = checkNotNull(fmtpAttributes.get(PARAMETER_PROFILE_LEVEL_ID));
-    formatBuilder.setCodecs(H264_CODECS_PREFIX + profileLevel);
-
     checkArgument(fmtpAttributes.containsKey(PARAMETER_SPROP_PARAMS));
     String spropParameterSets = checkNotNull(fmtpAttributes.get(PARAMETER_SPROP_PARAMS));
     String[] parameterSets = Util.split(spropParameterSets, ",");
@@ -193,6 +188,15 @@ import com.google.common.collect.ImmutableMap;
     formatBuilder.setPixelWidthHeightRatio(spsData.pixelWidthAspectRatio);
     formatBuilder.setHeight(spsData.height);
     formatBuilder.setWidth(spsData.width);
+
+    @Nullable String profileLevel = fmtpAttributes.get(PARAMETER_PROFILE_LEVEL_ID);
+    if (profileLevel != null) {
+      formatBuilder.setCodecs(H264_CODECS_PREFIX + profileLevel);
+    } else {
+      formatBuilder.setCodecs(
+          CodecSpecificDataUtil.buildAvcCodecString(
+              spsData.profileIdc, spsData.constraintsFlagsAndReservedZero2Bits, spsData.levelIdc));
+    }
   }
 
   private static byte[] getH264InitializationDataFromParameterSet(String parameterSet) {
@@ -212,5 +216,25 @@ import com.google.common.collect.ImmutableMap;
         /* destPos= */ NAL_START_CODE.length,
         decodedParameterNalData.length);
     return decodedParameterNalUnit;
+  }
+
+  /**
+   * Extracts the track URI.
+   *
+   * <p>The processing logic is specified in RFC2326 Section C.1.1.
+   *
+   * @param sessionUri The session URI.
+   * @param controlAttributeString The control attribute from the track's {@link MediaDescription}.
+   * @return The extracted track URI.
+   */
+  private static Uri extractTrackUri(Uri sessionUri, String controlAttributeString) {
+    Uri controlAttributeUri = Uri.parse(controlAttributeString);
+    if (controlAttributeUri.isAbsolute()) {
+      return controlAttributeUri;
+    } else if (controlAttributeString.equals(GENERIC_CONTROL_ATTR)) {
+      return sessionUri;
+    } else {
+      return sessionUri.buildUpon().appendEncodedPath(controlAttributeString).build();
+    }
   }
 }

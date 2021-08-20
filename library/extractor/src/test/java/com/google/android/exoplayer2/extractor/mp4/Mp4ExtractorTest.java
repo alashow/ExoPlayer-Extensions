@@ -22,9 +22,11 @@ import org.junit.runner.RunWith;
 import org.robolectric.ParameterizedRobolectricTestRunner;
 import org.robolectric.ParameterizedRobolectricTestRunner.Parameter;
 import org.robolectric.ParameterizedRobolectricTestRunner.Parameters;
+import org.robolectric.annotation.internal.DoNotInstrument;
 
 /** Tests for {@link Mp4Extractor}. */
 @RunWith(ParameterizedRobolectricTestRunner.class)
+@DoNotInstrument
 public final class Mp4ExtractorTest {
 
   @Parameters(name = "{0}")
@@ -83,5 +85,23 @@ public final class Mp4ExtractorTest {
   public void mp4SampleWithOpusTrack() throws Exception {
     ExtractorAsserts.assertBehavior(
         Mp4Extractor::new, "media/mp4/sample_opus.mp4", simulationConfig);
+  }
+
+  @Test
+  public void mp4SampleWithMha1Track() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        Mp4Extractor::new, "media/mp4/sample_mpegh_mha1.mp4", simulationConfig);
+  }
+
+  @Test
+  public void mp4SampleWithMhm1Track() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        Mp4Extractor::new, "media/mp4/sample_mpegh_mhm1.mp4", simulationConfig);
+  }
+
+  @Test
+  public void mp4SampleWithColorInfo() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        Mp4Extractor::new, "media/mp4/sample_with_color_info.mp4", simulationConfig);
   }
 }

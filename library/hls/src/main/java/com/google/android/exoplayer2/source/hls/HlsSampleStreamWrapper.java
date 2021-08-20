@@ -17,7 +17,9 @@ package com.google.android.exoplayer2.source.hls;
 
 import static com.google.android.exoplayer2.source.hls.HlsChunkSource.CHUNK_PUBLICATION_STATE_PUBLISHED;
 import static com.google.android.exoplayer2.source.hls.HlsChunkSource.CHUNK_PUBLICATION_STATE_REMOVED;
+import static com.google.android.exoplayer2.trackselection.TrackSelectionUtil.createFallbackOptions;
 import static java.lang.Math.max;
+import static java.lang.Math.min;
 
 import android.net.Uri;
 import android.os.Handler;
@@ -84,15 +86,17 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
 /**
- * Loads {@link HlsMediaChunk}s obtained from a {@link HlsChunkSource}, and provides
- * {@link SampleStream}s from which the loaded media can be consumed.
+ * Loads {@link HlsMediaChunk}s obtained from a {@link HlsChunkSource}, and provides {@link
+ * SampleStream}s from which the loaded media can be consumed.
  */
-/* package */ final class HlsSampleStreamWrapper implements Loader.Callback<Chunk>,
-    Loader.ReleaseCallback, SequenceableLoader, ExtractorOutput, UpstreamFormatChangedListener {
+/* package */ final class HlsSampleStreamWrapper
+    implements Loader.Callback<Chunk>,
+        Loader.ReleaseCallback,
+        SequenceableLoader,
+        ExtractorOutput,
+        UpstreamFormatChangedListener {
 
-  /**
-   * A callback to be notified of events.
-   */
+  /** A callback to be notified of events. */
   public interface Callback extends SequenceableLoader.Callback<HlsSampleStreamWrapper> {
 
     /**
@@ -234,10 +238,10 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     readOnlyMediaChunks = Collections.unmodifiableList(mediaChunks);
     hlsSampleStreams = new ArrayList<>();
     // Suppressions are needed because `this` is not initialized here.
-    @SuppressWarnings("nullness:methodref.receiver.bound.invalid")
+    @SuppressWarnings("nullness:methodref.receiver.bound")
     Runnable maybeFinishPrepareRunnable = this::maybeFinishPrepare;
     this.maybeFinishPrepareRunnable = maybeFinishPrepareRunnable;
-    @SuppressWarnings("nullness:methodref.receiver.bound.invalid")
+    @SuppressWarnings("nullness:methodref.receiver.bound")
     Runnable onTracksEndedRunnable = this::onTracksEnded;
     this.onTracksEndedRunnable = onTracksEndedRunnable;
     handler = Util.createHandlerForCurrentLooper();
@@ -275,7 +279,8 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
   public void maybeThrowPrepareError() throws IOException {
     maybeThrowError();
     if (loadingFinished && !prepared) {
-      throw new ParserException("Loading finished before preparation is complete.");
+      throw ParserException.createForMalformedContainer(
+          "Loading finished before preparation is complete.", /* cause= */ null);
     }
   }
 
@@ -550,7 +555,22 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     chunkSource.setIsTimestampMaster(isTimestampMaster);
   }
 
-  public boolean onPlaylistError(Uri playlistUrl, long exclusionDurationMs) {
+  public boolean onPlaylistError(Uri playlistUrl, LoadErrorInfo loadErrorInfo, boolean forceRetry) {
+    if (!chunkSource.obtainsChunksForPlaylist(playlistUrl)) {
+      // Return early if the chunk source doesn't deliver chunks for the failing playlist.
+      return true;
+    }
+    long exclusionDurationMs = C.TIME_UNSET;
+    if (!forceRetry) {
+      @Nullable
+      LoadErrorHandlingPolicy.FallbackSelection fallbackSelection =
+          loadErrorHandlingPolicy.getFallbackSelectionFor(
+              createFallbackOptions(chunkSource.getTrackSelection()), loadErrorInfo);
+      if (fallbackSelection != null
+          && fallbackSelection.type == LoadErrorHandlingPolicy.FALLBACK_TYPE_TRACK) {
+        exclusionDurationMs = fallbackSelection.exclusionDurationMs;
+      }
+    }
     return chunkSource.onPlaylistError(playlistUrl, exclusionDurationMs);
   }
 
@@ -636,17 +656,11 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     int skipCount = sampleQueue.getSkipCount(positionUs, loadingFinished);
 
     // Ensure we don't skip into preload chunks until we can be sure they are permanently published.
-    int readIndex = sampleQueue.getReadIndex();
-    for (int i = 0; i < mediaChunks.size(); i++) {
-      HlsMediaChunk mediaChunk = mediaChunks.get(i);
-      int firstSampleIndex = mediaChunks.get(i).getFirstSampleIndex(sampleQueueIndex);
-      if (readIndex + skipCount <= firstSampleIndex) {
-        break;
-      }
-      if (!mediaChunk.isPublished()) {
-        skipCount = firstSampleIndex - readIndex;
-        break;
-      }
+    @Nullable HlsMediaChunk lastChunk = Iterables.getLast(mediaChunks, /* defaultValue= */ null);
+    if (lastChunk != null && !lastChunk.isPublished()) {
+      int readIndex = sampleQueue.getReadIndex();
+      int firstSampleIndex = lastChunk.getFirstSampleIndex(sampleQueueIndex);
+      skipCount = min(skipCount, firstSampleIndex - readIndex);
     }
 
     sampleQueue.skip(skipCount);
@@ -664,8 +678,10 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     } else {
       long bufferedPositionUs = lastSeekPositionUs;
       HlsMediaChunk lastMediaChunk = getLastMediaChunk();
-      HlsMediaChunk lastCompletedMediaChunk = lastMediaChunk.isLoadCompleted() ? lastMediaChunk
-          : mediaChunks.size() > 1 ? mediaChunks.get(mediaChunks.size() - 2) : null;
+      HlsMediaChunk lastCompletedMediaChunk =
+          lastMediaChunk.isLoadCompleted()
+              ? lastMediaChunk
+              : mediaChunks.size() > 1 ? mediaChunks.get(mediaChunks.size() - 2) : null;
       if (lastCompletedMediaChunk != null) {
         bufferedPositionUs = max(bufferedPositionUs, lastCompletedMediaChunk.endTimeUs);
       }
@@ -709,6 +725,7 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
               ? lastMediaChunk.endTimeUs
               : max(lastSeekPositionUs, lastMediaChunk.startTimeUs);
     }
+    nextChunkHolder.clear();
     chunkSource.getNextChunk(
         positionUs,
         loadPositionUs,
@@ -718,7 +735,6 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     boolean endOfStream = nextChunkHolder.endOfStream;
     @Nullable Chunk loadable = nextChunkHolder.chunk;
     @Nullable Uri playlistUrlToLoad = nextChunkHolder.playlistUrl;
-    nextChunkHolder.clear();
 
     if (endOfStream) {
       pendingResetPositionUs = C.TIME_UNSET;
@@ -894,9 +910,14 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     LoadErrorInfo loadErrorInfo =
         new LoadErrorInfo(loadEventInfo, mediaLoadData, error, errorCount);
     LoadErrorAction loadErrorAction;
-    long exclusionDurationMs = loadErrorHandlingPolicy.getBlacklistDurationMsFor(loadErrorInfo);
-    if (exclusionDurationMs != C.TIME_UNSET) {
-      exclusionSucceeded = chunkSource.maybeExcludeTrack(loadable, exclusionDurationMs);
+    @Nullable
+    LoadErrorHandlingPolicy.FallbackSelection fallbackSelection =
+        loadErrorHandlingPolicy.getFallbackSelectionFor(
+            createFallbackOptions(chunkSource.getTrackSelection()), loadErrorInfo);
+    if (fallbackSelection != null
+        && fallbackSelection.type == LoadErrorHandlingPolicy.FALLBACK_TYPE_TRACK) {
+      exclusionSucceeded =
+          chunkSource.maybeExcludeTrack(loadable, fallbackSelection.exclusionDurationMs);
     }
 
     if (exclusionSucceeded) {
@@ -1505,15 +1526,20 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
             .setRoleFlags(playlistFormat.roleFlags)
             .setAverageBitrate(propagateBitrates ? playlistFormat.averageBitrate : Format.NO_VALUE)
             .setPeakBitrate(propagateBitrates ? playlistFormat.peakBitrate : Format.NO_VALUE)
-            .setCodecs(codecs)
-            .setWidth(playlistFormat.width)
-            .setHeight(playlistFormat.height);
+            .setCodecs(codecs);
+
+    if (sampleTrackType == C.TRACK_TYPE_VIDEO) {
+      formatBuilder
+          .setWidth(playlistFormat.width)
+          .setHeight(playlistFormat.height)
+          .setFrameRate(playlistFormat.frameRate);
+    }
 
     if (sampleMimeType != null) {
       formatBuilder.setSampleMimeType(sampleMimeType);
     }
 
-    if (playlistFormat.channelCount != Format.NO_VALUE) {
+    if (playlistFormat.channelCount != Format.NO_VALUE && sampleTrackType == C.TRACK_TYPE_AUDIO) {
       formatBuilder.setChannelCount(playlistFormat.channelCount);
     }
 
@@ -1755,10 +1781,9 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     }
 
     @Override
-    public void sampleData(
-        ParsableByteArray buffer, int length, @SampleDataPart int sampleDataPart) {
+    public void sampleData(ParsableByteArray data, int length, @SampleDataPart int sampleDataPart) {
       ensureBufferCapacity(bufferPosition + length);
-      buffer.readBytes(this.buffer, bufferPosition, length);
+      data.readBytes(this.buffer, bufferPosition, length);
       bufferPosition += length;
     }
 

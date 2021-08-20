@@ -97,8 +97,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   private static final String KEY_CROP_TOP = "crop-top";
 
   // Long edge length in pixels for standard video formats, in decreasing in order.
-  private static final int[] STANDARD_LONG_EDGE_VIDEO_PX = new int[] {
-      1920, 1600, 1440, 1280, 960, 854, 640, 540, 480};
+  private static final int[] STANDARD_LONG_EDGE_VIDEO_PX =
+      new int[] {1920, 1600, 1440, 1280, 960, 854, 640, 540, 480};
 
   /**
    * Scale factor for the initial maximum input size used to configure the codec in non-adaptive
@@ -124,7 +124,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   private boolean codecHandlesHdr10PlusOutOfBandMetadata;
 
   @Nullable private Surface surface;
-  @Nullable private Surface dummySurface;
+  @Nullable private DummySurface dummySurface;
   private boolean haveReportedFirstFrameRenderedForCurrentSurface;
   @C.VideoScalingMode private int scalingMode;
   private boolean renderedFirstFrameAfterReset;
@@ -166,8 +166,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    * @param allowedJoiningTimeMs The maximum duration in milliseconds for which this video renderer
    *     can attempt to seamlessly join an ongoing playback.
    */
-  public MediaCodecVideoRenderer(Context context, MediaCodecSelector mediaCodecSelector,
-      long allowedJoiningTimeMs) {
+  public MediaCodecVideoRenderer(
+      Context context, MediaCodecSelector mediaCodecSelector, long allowedJoiningTimeMs) {
     this(
         context,
         mediaCodecSelector,
@@ -486,6 +486,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     }
   }
 
+  @TargetApi(17) // Needed for dummySurface usage. dummySurface is always null on API level 16.
   @Override
   protected void onReset() {
     try {
@@ -596,12 +597,18 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     return tunneling && Util.SDK_INT < 23;
   }
 
+  @TargetApi(17) // Needed for dummySurface usage. dummySurface is always null on API level 16.
   @Override
   protected MediaCodecAdapter.Configuration getMediaCodecConfiguration(
       MediaCodecInfo codecInfo,
       Format format,
       @Nullable MediaCrypto crypto,
       float codecOperatingRate) {
+    if (dummySurface != null && dummySurface.secure != codecInfo.secure) {
+      // We can't re-use the current DummySurface instance with the new decoder.
+      dummySurface.release();
+      dummySurface = null;
+    }
     String codecMimeType = codecInfo.codecMimeType;
     codecMaxValues = getCodecMaxValues(codecInfo, format, getStreamFormats());
     MediaFormat mediaFormat =
@@ -676,8 +683,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   @Override
-  protected void onCodecInitialized(String name, long initializedTimestampMs,
-      long initializationDurationMs) {
+  protected void onCodecInitialized(
+      String name, long initializedTimestampMs, long initializationDurationMs) {
     eventDispatcher.decoderInitialized(name, initializedTimestampMs, initializationDurationMs);
     codecNeedsSetOutputSurfaceWorkaround = codecNeedsSetOutputSurfaceWorkaround(name);
     codecHandlesHdr10PlusOutOfBandMetadata =
@@ -1065,9 +1072,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    * @throws ExoPlaybackException If an error occurs flushing the codec.
    */
   protected boolean maybeDropBuffersToKeyframe(
-      long positionUs,
-      boolean treatDroppedBuffersAsSkipped)
-      throws ExoPlaybackException {
+      long positionUs, boolean treatDroppedBuffersAsSkipped) throws ExoPlaybackException {
     int droppedSourceBufferCount = skipSource(positionUs);
     if (droppedSourceBufferCount == 0) {
       return false;
@@ -1162,8 +1167,10 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   private void setJoiningDeadlineMs() {
-    joiningDeadlineMs = allowedJoiningTimeMs > 0
-        ? (SystemClock.elapsedRealtime() + allowedJoiningTimeMs) : C.TIME_UNSET;
+    joiningDeadlineMs =
+        allowedJoiningTimeMs > 0
+            ? (SystemClock.elapsedRealtime() + allowedJoiningTimeMs)
+            : C.TIME_UNSET;
   }
 
   private void clearRenderedFirstFrame() {
@@ -1423,8 +1430,10 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
         // Don't return a size not larger than the format for which the codec is being configured.
         return null;
       } else if (Util.SDK_INT >= 21) {
-        Point alignedSize = codecInfo.alignVideoSizeV21(isVerticalVideo ? shortEdgePx : longEdgePx,
-            isVerticalVideo ? longEdgePx : shortEdgePx);
+        Point alignedSize =
+            codecInfo.alignVideoSizeV21(
+                isVerticalVideo ? shortEdgePx : longEdgePx,
+                isVerticalVideo ? longEdgePx : shortEdgePx);
         float frameRate = format.frameRate;
         if (codecInfo.isVideoSizeAndRateSupportedV21(alignedSize.x, alignedSize.y, frameRate)) {
           return alignedSize;
